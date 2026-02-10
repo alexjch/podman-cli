@@ -22,6 +22,10 @@ func NewRemoteCLI() *RemoteCLI {
 	return &RemoteCLI{}
 }
 
+// The argument parsing/validation and remote command construction have multiple branches
+// worth testing (e.g., missing --host, flag parse errors, and args that include
+// spaces/metacharacters to ensure correct escaping/quoting). Add unit tests around Run
+// to lock in expected exit codes and constructed command behavior.
 func (rc *RemoteCLI) Run(args []string) int {
 	fs := flag.NewFlagSet("remote-cli", flag.ContinueOnError)
 
@@ -35,10 +39,15 @@ func (rc *RemoteCLI) Run(args []string) int {
 	}
 
 	cmd := []string{"podman"}
+	// Building a remote command by strings.Join(cmd, \" \") is unsafe and can be
+	// incorrect when arguments contain spaces/shell metacharacters; it can also
+	// enable shell injection depending on how the remote executes the command.
+	// before joining, or otherwise avoid shell interpretation.
 	cmd = append(cmd, fs.Args()...)
 
 	if rc.host == "" {
-		log.Println("Argument host is required")
+		log.Println("Flag -host is required. Use -host to specify the remote host.")
+		fs.PrintDefaults()
 		return 1
 	}
 
@@ -56,7 +65,7 @@ func (rc *RemoteCLI) Run(args []string) int {
 
 	sshClient, err := client.NewSSHClient(sshConfig.Addr(), sshClientConfig)
 	if err != nil {
-		fmt.Printf("%+v", sshClientConfig)
+
 		log.Printf("Failed while connecting to client: %s", err.Error())
 		return 1
 	}
@@ -71,16 +80,20 @@ func (rc *RemoteCLI) Run(args []string) int {
 	}
 	defer session.Close()
 
-	// Once a Session is created, you can execute a single command on
-	// the remote side using the Run method.
-	var b bytes.Buffer
-	session.Stdout = &b
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	session.Stdout = &stdout
+	session.Stderr = &stderr
 	cmdStr := strings.Join(cmd, " ")
 	if err := session.Run(cmdStr); err != nil {
-		log.Printf("Failed to run: %s", err.Error())
+		if stderr.Len() > 0 {
+			log.Printf("Failed to run: %s; stderr: %s", err.Error(), stderr.String())
+		} else {
+			log.Printf("Failed to run: %s", err.Error())
+		}
 		return 1
 	}
-	fmt.Println(b.String())
+	fmt.Print(stdout.String())
 
 	return 0
 }

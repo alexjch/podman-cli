@@ -10,6 +10,7 @@ import (
 
 	"github.com/kevinburke/ssh_config"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 type SSHConfig struct {
@@ -26,7 +27,6 @@ func (c *SSHConfig) Addr() string {
 func (c *SSHConfig) SSHClientConfig(timeout time.Duration, insecure bool) (*ssh.ClientConfig, error) {
 
 	var hostKeyCallback ssh.HostKeyCallback
-	var hostKey ssh.PublicKey
 
 	key, err := os.ReadFile(c.IdentityFile)
 	if err != nil {
@@ -42,7 +42,11 @@ func (c *SSHConfig) SSHClientConfig(timeout time.Duration, insecure bool) (*ssh.
 	if insecure {
 		hostKeyCallback = ssh.InsecureIgnoreHostKey()
 	} else {
-		hostKeyCallback = ssh.FixedHostKey(hostKey)
+		knownHostsFile := filepath.Join(os.Getenv("HOME"), ".ssh", "known_hosts")
+		hostKeyCallback, err = knownhosts.New(knownHostsFile)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	config := &ssh.ClientConfig{
