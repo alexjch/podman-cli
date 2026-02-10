@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kevinburke/ssh_config"
 	"golang.org/x/crypto/ssh"
@@ -22,7 +23,10 @@ func (c *SSHConfig) Addr() string {
 	return fmt.Sprintf("%s:%d", c.HostName, c.Port)
 }
 
-func (c *SSHConfig) SSHClientConfig() (*ssh.ClientConfig, error) {
+func (c *SSHConfig) SSHClientConfig(timeout time.Duration, insecure bool) (*ssh.ClientConfig, error) {
+
+	var hostKeyCallback ssh.HostKeyCallback
+	var hostKey ssh.PublicKey
 
 	key, err := os.ReadFile(c.IdentityFile)
 	if err != nil {
@@ -35,13 +39,20 @@ func (c *SSHConfig) SSHClientConfig() (*ssh.ClientConfig, error) {
 		return nil, err
 	}
 
+	if insecure {
+		hostKeyCallback = ssh.InsecureIgnoreHostKey()
+	} else {
+		hostKeyCallback = ssh.FixedHostKey(hostKey)
+	}
+
 	config := &ssh.ClientConfig{
 		User: c.User,
 		Auth: []ssh.AuthMethod{
 			// Use the PublicKeys method for remote authentication.
 			ssh.PublicKeys(signer),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         timeout,
 	}
 
 	return config, nil

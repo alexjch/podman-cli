@@ -23,15 +23,19 @@ func NewRemoteCLI() *RemoteCLI {
 }
 
 func (rc *RemoteCLI) Run(args []string) int {
+	fs := flag.NewFlagSet("remote-cli", flag.ContinueOnError)
 
-	flag.StringVar(&rc.host, "host", "", "Host to connect")
-	flag.DurationVar(&rc.timeout, "timeout", 30*time.Second, "Command execution timeout")
-	flag.BoolVar(&rc.insecure, "no-host-validation", false, "Do not verify host")
+	fs.StringVar(&rc.host, "host", "", "Host to connect")
+	fs.DurationVar(&rc.timeout, "timeout", 30*time.Second, "Command execution timeout")
+	fs.BoolVar(&rc.insecure, "no-host-validation", false, "Do not verify host")
 
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		log.Printf("Failed to parse arguments: %s", err.Error())
+		return 1
+	}
 
 	cmd := []string{"podman"}
-	cmd = append(cmd, flag.Args()...)
+	cmd = append(cmd, fs.Args()...)
 
 	if rc.host == "" {
 		log.Println("Argument host is required")
@@ -44,7 +48,7 @@ func (rc *RemoteCLI) Run(args []string) int {
 		return 1
 	}
 
-	sshClientConfig, err := sshConfig.SSHClientConfig()
+	sshClientConfig, err := sshConfig.SSHClientConfig(rc.timeout, rc.insecure)
 	if err != nil {
 		log.Printf("Failed while configuring ssh connection: %s", err.Error())
 		return 1

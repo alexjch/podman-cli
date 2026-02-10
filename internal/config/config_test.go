@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewSSHConfig_ValidConfig(t *testing.T) {
@@ -540,7 +541,9 @@ func TestSSHConfig_SSHClientConfig(t *testing.T) {
 		IdentityFile: keyFile,
 	}
 
-	clientConfig, err := config.SSHClientConfig()
+	timeout := 30 * time.Second
+	insecure := true
+	clientConfig, err := config.SSHClientConfig(timeout, insecure)
 	if err != nil {
 		t.Fatalf("SSHClientConfig() unexpected error = %v", err)
 	}
@@ -550,7 +553,7 @@ func TestSSHConfig_SSHClientConfig(t *testing.T) {
 	}
 
 	if clientConfig.User != config.User {
-		t.Errorf("SSHClientConfig().User = %q, want %q", clientConfig.User, "username")
+		t.Errorf("SSHClientConfig().User = %q, want %q", clientConfig.User, config.User)
 	}
 
 	if len(clientConfig.Auth) == 0 {
@@ -559,5 +562,68 @@ func TestSSHConfig_SSHClientConfig(t *testing.T) {
 
 	if clientConfig.HostKeyCallback == nil {
 		t.Error("SSHClientConfig().HostKeyCallback is nil")
+	}
+
+	if clientConfig.Timeout != timeout {
+		t.Errorf("SSHClientConfig().Timeout = %v, want %v", clientConfig.Timeout, timeout)
+	}
+}
+
+func TestSSHConfig_SSHClientConfig_Secure(t *testing.T) {
+	tmpDir := t.TempDir()
+	sshDir := filepath.Join(tmpDir, ".ssh")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		t.Fatalf("Failed to create .ssh directory: %v", err)
+	}
+
+	// Generate a test RSA private key
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("Failed to generate private key: %v", err)
+	}
+
+	// Encode private key to PEM format
+	privateKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+	})
+
+	keyFile := filepath.Join(sshDir, "id_rsa")
+	if err := os.WriteFile(keyFile, privateKeyPEM, 0600); err != nil {
+		t.Fatalf("Failed to write test key file: %v", err)
+	}
+
+	config := &SSHConfig{
+		HostName:     "test.example.com",
+		Port:         22,
+		User:         "testuser",
+		IdentityFile: keyFile,
+	}
+
+	timeout := 30 * time.Second
+	insecure := false
+	clientConfig, err := config.SSHClientConfig(timeout, insecure)
+	if err != nil {
+		t.Fatalf("SSHClientConfig() unexpected error = %v", err)
+	}
+
+	if clientConfig == nil {
+		t.Fatal("SSHClientConfig() returned nil")
+	}
+
+	if clientConfig.User != config.User {
+		t.Errorf("SSHClientConfig().User = %q, want %q", clientConfig.User, config.User)
+	}
+
+	if len(clientConfig.Auth) == 0 {
+		t.Error("SSHClientConfig().Auth is empty, expected at least one auth method")
+	}
+
+	if clientConfig.HostKeyCallback == nil {
+		t.Error("SSHClientConfig().HostKeyCallback is nil")
+	}
+
+	if clientConfig.Timeout != timeout {
+		t.Errorf("SSHClientConfig().Timeout = %v, want %v", clientConfig.Timeout, timeout)
 	}
 }
