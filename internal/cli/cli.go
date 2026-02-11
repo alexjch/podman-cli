@@ -1,15 +1,16 @@
 package cli
 
 import (
-	"bytes"
 	"flag"
-	"fmt"
+	"io"
 	"log"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/alexjch/podman-cli/internal/client"
 	"github.com/alexjch/podman-cli/internal/config"
+	"golang.org/x/term"
 )
 
 type RemoteCLI struct {
@@ -80,20 +81,66 @@ func (rc *RemoteCLI) Run(args []string) int {
 	}
 	defer session.Close()
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	session.Stdout = &stdout
-	session.Stderr = &stderr
-	cmdStr := strings.Join(cmd, " ")
-	if err := session.Run(cmdStr); err != nil {
-		if stderr.Len() > 0 {
-			log.Printf("Failed to run: %s; stderr: %s", err.Error(), stderr.String())
-		} else {
-			log.Printf("Failed to run: %s", err.Error())
+	///// TODO:
+	// Narrow the list of posible commands
+
+	// Set up terminal modes
+	fd := int(os.Stdin.Fd())
+	isTerminal := term.IsTerminal(fd)
+
+	if isTerminal {
+		// Request a pseudo-terminal
+		oldState, err := term.MakeRaw(fd)
+		if err != nil {
+			log.Printf("Failed to set raw mode: %s", err.Error())
+			return 1
 		}
+		defer term.Restore(fd, oldState)
+
+		// Get terminal size
+		width, height, err := term.GetSize(fd)
+		if err != nil {
+			width, height = 80, 24 // Default size
+		}
+
+		// Request PTY
+		if err := session.RequestPty("xterm-256color", height, width, nil); err != nil {
+			log.Printf("Failed to request pty: %s", err.Error())
+			return 1
+		}
+	}
+
+	// Connect stdin, stdout, and stderr
+	session.Stdout = os.Stdout
+	session.Stderr = os.Stderr
+	stdinPipe, err := session.StdinPipe()
+	if err != nil {
+		log.Printf("Failed to get stdin pipe: %s", err.Error())
 		return 1
 	}
-	fmt.Print(stdout.String())
+
+	// Build and execute command
+	cmdStr := strings.Join(cmd, " ")
+	if err := session.Start(cmdStr); err != nil {
+		log.Printf("Failed to start command: %s", err.Error())
+		return 1
+	}
+
+	// Copy stdin to the remote session
+	go func() {
+		io.Copy(stdinPipe, os.Stdin)
+		stdinPipe.Close()
+	}()
+
+	// Wait for the command to complete
+	if err := session.Wait(); err != nil {
+		if exitErr, ok := err.(*os.SyscallError); ok {
+			log.Printf("Command failed: %s", exitErr.Error())
+			return 1
+		}
+		// Non-zero exit codes are also returned as errors
+		return 1
+	}
 
 	return 0
 }
