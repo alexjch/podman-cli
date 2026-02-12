@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -10,61 +12,71 @@ import (
 
 	"github.com/alexjch/podman-cli/internal/client"
 	"github.com/alexjch/podman-cli/internal/config"
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
 
 type RemoteCLI struct {
-	host     string
-	timeout  time.Duration
-	insecure bool
+	addr         string
+	command      string
+	clientConfig *ssh.ClientConfig
 }
 
-func NewRemoteCLI() *RemoteCLI {
-	return &RemoteCLI{}
+func NewRemoteCLI(args []string) (*RemoteCLI, error) {
+	var host string
+	var timeout time.Duration
+	var insecure bool
+
+	fs := flag.NewFlagSet("remote-cli", flag.ContinueOnError)
+
+	fs.StringVar(&host, "host", "", "Host to connect")
+	fs.DurationVar(&timeout, "timeout", 30*time.Second, "Command execution timeout")
+	fs.BoolVar(&insecure, "no-host-validation", false, "Do not verify host")
+
+	if err := fs.Parse(args); err != nil {
+		log.Printf("Failed to parse arguments: %s", err.Error())
+		return nil, err
+	}
+
+	cmd := []string{"podman"}
+
+	// Building a remote command by strings.Join(cmd, \" \") is unsafe and can be
+	// incorrect when arguments contain spaces/shell metacharacters; it can also
+	// enable shell injection depending on how the remote executes the command.
+	// before joining, or otherwise avoid shell interpretation.
+	cmdStr := strings.Join(append(cmd, fs.Args()...), " ")
+
+	if host == "" {
+		fs.PrintDefaults()
+		return nil, errors.New("Flag -host is required. Use -host to specify the remote host.")
+	}
+
+	sshConfig, err := config.NewSSHConfig(host)
+	if err != nil {
+		return nil, err
+	}
+
+	clientConfig, err := sshConfig.SSHClientConfig(timeout, insecure)
+	if err != nil {
+		return nil, err
+	}
+
+	addr := fmt.Sprintf("%s:%d", sshConfig.HostName, sshConfig.Port)
+
+	return &RemoteCLI{
+		addr:         addr,
+		command:      cmdStr,
+		clientConfig: clientConfig,
+	}, nil
 }
 
 // The argument parsing/validation and remote command construction have multiple branches
 // worth testing (e.g., missing --host, flag parse errors, and args that include
 // spaces/metacharacters to ensure correct escaping/quoting). Add unit tests around Run
 // to lock in expected exit codes and constructed command behavior.
-func (rc *RemoteCLI) Run(args []string) int {
-	fs := flag.NewFlagSet("remote-cli", flag.ContinueOnError)
+func (rc *RemoteCLI) Run() int {
 
-	fs.StringVar(&rc.host, "host", "", "Host to connect")
-	fs.DurationVar(&rc.timeout, "timeout", 30*time.Second, "Command execution timeout")
-	fs.BoolVar(&rc.insecure, "no-host-validation", false, "Do not verify host")
-
-	if err := fs.Parse(args); err != nil {
-		log.Printf("Failed to parse arguments: %s", err.Error())
-		return 1
-	}
-
-	cmd := []string{"podman"}
-	// Building a remote command by strings.Join(cmd, \" \") is unsafe and can be
-	// incorrect when arguments contain spaces/shell metacharacters; it can also
-	// enable shell injection depending on how the remote executes the command.
-	// before joining, or otherwise avoid shell interpretation.
-	cmd = append(cmd, fs.Args()...)
-
-	if rc.host == "" {
-		log.Println("Flag -host is required. Use -host to specify the remote host.")
-		fs.PrintDefaults()
-		return 1
-	}
-
-	sshConfig, err := config.NewSSHConfig(rc.host)
-	if err != nil {
-		log.Printf("Failed while reading config file: %s", err.Error())
-		return 1
-	}
-
-	sshClientConfig, err := sshConfig.SSHClientConfig(rc.timeout, rc.insecure)
-	if err != nil {
-		log.Printf("Failed while configuring ssh connection: %s", err.Error())
-		return 1
-	}
-
-	sshClient, err := client.NewSSHClient(sshConfig.Addr(), sshClientConfig)
+	sshClient, err := client.NewSSHClient(rc.addr, rc.clientConfig)
 	if err != nil {
 
 		log.Printf("Failed while connecting to client: %s", err.Error())
@@ -80,9 +92,6 @@ func (rc *RemoteCLI) Run(args []string) int {
 		return 1
 	}
 	defer session.Close()
-
-	///// TODO:
-	// Narrow the list of posible commands
 
 	// Set up terminal modes
 	fd := int(os.Stdin.Fd())
@@ -120,8 +129,7 @@ func (rc *RemoteCLI) Run(args []string) int {
 	}
 
 	// Build and execute command
-	cmdStr := strings.Join(cmd, " ")
-	if err := session.Start(cmdStr); err != nil {
+	if err := session.Start(rc.command); err != nil {
 		log.Printf("Failed to start command: %s", err.Error())
 		return 1
 	}
