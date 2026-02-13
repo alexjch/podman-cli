@@ -1,28 +1,30 @@
 package cli
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/alexjch/podman-cli/internal/client"
-	"github.com/alexjch/podman-cli/internal/config"
+	"github.com/alexjch/podman-cli/internal/commands"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/term"
 )
 
 type RemoteCLI struct {
-	addr         string
-	command      string
-	clientConfig *ssh.ClientConfig
+	addr            string
+	command         commands.Command
+	sshClientConfig *ssh.ClientConfig
 }
 
 func NewRemoteCLI(args []string) (*RemoteCLI, error) {
+
 	var host string
 	var timeout time.Duration
 	var insecure bool
@@ -30,125 +32,104 @@ func NewRemoteCLI(args []string) (*RemoteCLI, error) {
 	fs := flag.NewFlagSet("remote-cli", flag.ContinueOnError)
 
 	fs.StringVar(&host, "host", "", "Host to connect")
-	fs.DurationVar(&timeout, "timeout", 30*time.Second, "Command execution timeout")
+	fs.DurationVar(&timeout, "timeout", 30*time.Second, "SSH connection timeout")
 	fs.BoolVar(&insecure, "no-host-validation", false, "Do not verify host")
 
 	if err := fs.Parse(args); err != nil {
-		log.Printf("Failed to parse arguments: %s", err.Error())
+		log.Printf("Failed to parse arguments: %v", err)
 		return nil, err
 	}
 
-	cmd := []string{"podman"}
-
-	// Building a remote command by strings.Join(cmd, \" \") is unsafe and can be
-	// incorrect when arguments contain spaces/shell metacharacters; it can also
-	// enable shell injection depending on how the remote executes the command.
-	// before joining, or otherwise avoid shell interpretation.
-	cmdStr := strings.Join(append(cmd, fs.Args()...), " ")
+	if fs.NArg() < 1 {
+		return nil, fmt.Errorf("at least one command must be provided")
+	}
 
 	if host == "" {
 		fs.PrintDefaults()
-		return nil, errors.New("Flag -host is required. Use -host to specify the remote host.")
+		return nil, errors.New("-host is required (use -host to specify the remote host)")
 	}
 
-	sshConfig, err := config.NewSSHConfig(host)
+	cmds := fs.Args()
+	command := commands.IsCommand(cmds[0])
+	if command == nil {
+		return nil, fmt.Errorf("invalid command: %s", cmds[0])
+	}
+
+	userConfig, err := client.NewUserConfig(host)
 	if err != nil {
 		return nil, err
 	}
 
-	clientConfig, err := sshConfig.SSHClientConfig(timeout, insecure)
+	sshClientConfig, err := client.NewSSHClientConfig(timeout, insecure, userConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	addr := fmt.Sprintf("%s:%d", sshConfig.HostName, sshConfig.Port)
+	cli := &RemoteCLI{
+		addr:            userConfig.Addr(),
+		command:         *command,
+		sshClientConfig: sshClientConfig,
+	}
 
-	return &RemoteCLI{
-		addr:         addr,
-		command:      cmdStr,
-		clientConfig: clientConfig,
-	}, nil
+	return cli, nil
 }
 
-// The argument parsing/validation and remote command construction have multiple branches
-// worth testing (e.g., missing --host, flag parse errors, and args that include
-// spaces/metacharacters to ensure correct escaping/quoting). Add unit tests around Run
-// to lock in expected exit codes and constructed command behavior.
 func (rc *RemoteCLI) Run() int {
 
-	sshClient, err := client.NewSSHClient(rc.addr, rc.clientConfig)
+	// SSH Connection / Tunel
+	sshClient, err := client.NewSSHClient(rc.addr, rc.sshClientConfig)
 	if err != nil {
-
-		log.Printf("Failed while connecting to client: %s", err.Error())
+		log.Printf("Failed while connecting to client: %v", err)
 		return 1
 	}
 	defer sshClient.Close()
 
-	// Each ClientConn can support multiple interactive sessions,
-	// represented by a Session.
-	session, err := sshClient.NewSession()
+	// Socket connections / tuneled connection
+	remoteSocket := "/run/user/1000/podman/podman.sock"
+	conn, err := sshClient.Dial("unix", remoteSocket)
 	if err != nil {
-		log.Printf("Failed to create session: %s", err)
+		log.Printf("dial remote socket: %v", err)
 		return 1
 	}
-	defer session.Close()
+	defer conn.Close()
 
-	// Set up terminal modes
-	fd := int(os.Stdin.Fd())
-	isTerminal := term.IsTerminal(fd)
-
-	if isTerminal {
-		// Request a pseudo-terminal
-		oldState, err := term.MakeRaw(fd)
-		if err != nil {
-			log.Printf("Failed to set raw mode: %s", err.Error())
-			return 1
-		}
-		defer term.Restore(fd, oldState)
-
-		// Get terminal size
-		width, height, err := term.GetSize(fd)
-		if err != nil {
-			width, height = 80, 24 // Default size
-		}
-
-		// Request PTY
-		if err := session.RequestPty("xterm-256color", height, width, nil); err != nil {
-			log.Printf("Failed to request pty: %s", err.Error())
-			return 1
-		}
+	// Build the request (use a dummy host; Host header required by http.ReadResponse)
+	u := &url.URL{Scheme: "http", Host: "localhost", Path: rc.command.Path}
+	req := &http.Request{
+		Method: rc.command.Method,
+		URL:    u,
+		Host:   "localhost",
+		Header: make(http.Header),
 	}
 
-	// Connect stdin, stdout, and stderr
-	session.Stdout = os.Stdout
-	session.Stderr = os.Stderr
-	stdinPipe, err := session.StdinPipe()
+	// Write request to the connection
+	if err := req.Write(conn); err != nil {
+		log.Printf("Error with request: %v\n", err)
+		return 1
+	}
+
+	// Read response
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
 	if err != nil {
-		log.Printf("Failed to get stdin pipe: %s", err.Error())
+		log.Printf("Error with response: %s\n", err)
 		return 1
 	}
+	defer resp.Body.Close()
 
-	// Build and execute command
-	if err := session.Start(rc.command); err != nil {
-		log.Printf("Failed to start command: %s", err.Error())
+	// Print status and body
+	fmt.Println("Status:", resp.Status)
+	body := new(strings.Builder)
+	_, err = bufio.NewReader(resp.Body).WriteTo(body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read body: %v\n", err)
 		return 1
 	}
+	fmt.Println(body.String())
 
-	// Copy stdin to the remote session
-	go func() {
-		io.Copy(stdinPipe, os.Stdin)
-		stdinPipe.Close()
-	}()
-
-	// Wait for the command to complete
-	if err := session.Wait(); err != nil {
-		if exitErr, ok := err.(*os.SyscallError); ok {
-			log.Printf("Command failed: %s", exitErr.Error())
-			return 1
-		}
-		// Non-zero exit codes are also returned as errors
+	// Use HTTP status code to determine exit code: non-2xx => failure
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= 300 {
 		return 1
 	}
-
 	return 0
 }

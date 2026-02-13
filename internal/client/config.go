@@ -1,10 +1,9 @@
-package config
+package client
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -13,22 +12,23 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-type SSHConfig struct {
-	HostName     string
-	User         string
-	IdentityFile string
-	Port         int
+type UserConfig struct {
+	user         string
+	port         string
+	hostName     string
+	knownHosts   string
+	identityFile string
 }
 
-func (c *SSHConfig) Addr() string {
-	return fmt.Sprintf("%s:%d", c.HostName, c.Port)
+func sshUserFilePath(fileName string) string {
+	return filepath.Join(os.Getenv("HOME"), ".ssh", fileName)
 }
 
-func (c *SSHConfig) SSHClientConfig(timeout time.Duration, insecure bool) (*ssh.ClientConfig, error) {
+func NewSSHClientConfig(timeout time.Duration, insecure bool, userConfig *UserConfig) (*ssh.ClientConfig, error) {
 
 	var hostKeyCallback ssh.HostKeyCallback
 
-	key, err := os.ReadFile(c.IdentityFile)
+	key, err := os.ReadFile(userConfig.identityFile)
 	if err != nil {
 		return nil, err
 	}
@@ -42,15 +42,14 @@ func (c *SSHConfig) SSHClientConfig(timeout time.Duration, insecure bool) (*ssh.
 	if insecure {
 		hostKeyCallback = ssh.InsecureIgnoreHostKey()
 	} else {
-		knownHostsFile := filepath.Join(os.Getenv("HOME"), ".ssh", "known_hosts")
-		hostKeyCallback, err = knownhosts.New(knownHostsFile)
+		hostKeyCallback, err = knownhosts.New(userConfig.knownHosts)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	config := &ssh.ClientConfig{
-		User: c.User,
+	clientConfig := &ssh.ClientConfig{
+		User: userConfig.user,
 		Auth: []ssh.AuthMethod{
 			// Use the PublicKeys method for remote authentication.
 			ssh.PublicKeys(signer),
@@ -59,15 +58,21 @@ func (c *SSHConfig) SSHClientConfig(timeout time.Duration, insecure bool) (*ssh.
 		Timeout:         timeout,
 	}
 
-	return config, nil
+	return clientConfig, nil
 }
 
-func NewSSHConfig(host string) (*SSHConfig, error) {
+func (uc *UserConfig) Addr() string {
+	return fmt.Sprintf("%s:%s", uc.hostName, uc.port)
+}
 
-	file, err := os.Open(filepath.Join(os.Getenv("HOME"), ".ssh", "config"))
+func NewUserConfig(host string) (*UserConfig, error) {
+
+	file, err := os.Open(sshUserFilePath("config"))
 	if err != nil {
 		return nil, err
 	}
+	defer file.Close()
+
 	conf, err := ssh_config.Decode(file)
 	if err != nil {
 		return nil, err
@@ -101,7 +106,7 @@ func NewSSHConfig(host string) (*SSHConfig, error) {
 	}
 
 	if idFile == "" {
-		idFile = filepath.Join(os.Getenv("HOME"), ".ssh", "id_ed25519")
+		idFile = sshUserFilePath("id_ed25519")
 	} else if strings.HasPrefix(idFile, "~/") {
 		// Expand tilde to HOME directory
 		idFile = filepath.Join(os.Getenv("HOME"), idFile[2:])
@@ -117,15 +122,15 @@ func NewSSHConfig(host string) (*SSHConfig, error) {
 		port = "22"
 	}
 
-	portInt, err := strconv.Atoi(port)
-	if err != nil {
-		return nil, err
+	knownHostsFile := sshUserFilePath("known_hosts")
+
+	userConfig := &UserConfig{
+		user:         user,
+		port:         port,
+		hostName:     hostName,
+		knownHosts:   knownHostsFile,
+		identityFile: idFile,
 	}
 
-	return &SSHConfig{
-		HostName:     hostName,
-		Port:         portInt,
-		User:         user,
-		IdentityFile: idFile,
-	}, nil
+	return userConfig, nil
 }
