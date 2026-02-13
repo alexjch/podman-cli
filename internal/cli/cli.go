@@ -1,3 +1,6 @@
+// Package cli implements the command-line interface for the remote Podman client.
+// It handles argument parsing, SSH connection setup, and command execution through
+// HTTP requests over SSH-tunneled Unix sockets.
 package cli
 
 import (
@@ -17,12 +20,27 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// RemoteCLI represents a configured remote Podman CLI session.
+// It holds the SSH connection details and command to be executed.
 type RemoteCLI struct {
 	addr            string
 	command         commands.Command
 	sshClientConfig *ssh.ClientConfig
 }
 
+// NewRemoteCLI creates a new RemoteCLI instance by parsing command-line arguments.
+// It validates the arguments, loads SSH configuration, and prepares the command for execution.
+//
+// Required arguments:
+//   - -host: the SSH host to connect to (as defined in ~/.ssh/config)
+//   - command: the Podman command to execute (e.g., "list_containers")
+//
+// Optional arguments:
+//   - -timeout: SSH connection timeout (default: 30s)
+//   - -no-host-validation: skip SSH host key verification (not recommended)
+//
+// Returns an error if required arguments are missing, the command is invalid,
+// or SSH configuration cannot be loaded.
 func NewRemoteCLI(args []string) (*RemoteCLI, error) {
 
 	var host string
@@ -74,9 +92,19 @@ func NewRemoteCLI(args []string) (*RemoteCLI, error) {
 	return cli, nil
 }
 
+// Run executes the configured Podman command on the remote host.
+// It establishes an SSH connection, tunnels to the Podman Unix socket,
+// sends an HTTP request, and prints the response.
+//
+// The function returns an exit code:
+//   - 0: success (HTTP 2xx response)
+//   - 1: failure (connection error, HTTP error, or non-2xx response)
+//
+// The response status and body are printed to stdout.
+// Errors are logged to stderr.
 func (rc *RemoteCLI) Run() int {
 
-	// SSH Connection / Tunel
+	// Establish SSH connection to the remote host
 	sshClient, err := client.NewSSHClient(rc.addr, rc.sshClientConfig)
 	if err != nil {
 		log.Printf("Failed while connecting to client: %v", err)
@@ -84,7 +112,7 @@ func (rc *RemoteCLI) Run() int {
 	}
 	defer sshClient.Close()
 
-	// Socket connections / tuneled connection
+	// Dial the remote Podman Unix socket through the SSH tunnel
 	remoteSocket := "/run/user/1000/podman/podman.sock"
 	conn, err := sshClient.Dial("unix", remoteSocket)
 	if err != nil {
@@ -93,7 +121,9 @@ func (rc *RemoteCLI) Run() int {
 	}
 	defer conn.Close()
 
-	// Build the request (use a dummy host; Host header required by http.ReadResponse)
+	// Build the HTTP request for the Podman API
+	// Note: The Host header is required by http.ReadResponse, but the actual
+	// communication happens through the Unix socket over SSH
 	u := &url.URL{Scheme: "http", Host: "localhost", Path: rc.command.Path}
 	req := &http.Request{
 		Method: rc.command.Method,

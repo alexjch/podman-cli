@@ -1,3 +1,6 @@
+// Package main provides the entry point for the podman-cli application.
+// This CLI tool connects to remote Podman instances via SSH and executes
+// commands through the Podman HTTP API over an SSH tunnel.
 package main
 
 import (

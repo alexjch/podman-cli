@@ -1,3 +1,6 @@
+// Package client provides SSH client configuration and connection management
+// for connecting to remote Podman instances. It handles SSH config file parsing,
+// authentication, and host key verification.
 package client
 
 import (
@@ -12,6 +15,8 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
+// UserConfig holds the SSH configuration for connecting to a remote host.
+// It stores credentials, connection details, and paths to SSH files.
 type UserConfig struct {
 	user         string
 	port         string
@@ -20,10 +25,20 @@ type UserConfig struct {
 	identityFile string
 }
 
+// sshUserFilePath constructs an absolute path to a file in the user's .ssh directory.
 func sshUserFilePath(fileName string) string {
 	return filepath.Join(os.Getenv("HOME"), ".ssh", fileName)
 }
 
+// NewSSHClientConfig creates an SSH client configuration from user config.
+// It reads the identity file, sets up authentication, and configures host key verification.
+//
+// Parameters:
+//   - timeout: SSH connection timeout duration
+//   - insecure: if true, skips host key verification (not recommended for production)
+//   - userConfig: user configuration containing SSH details
+//
+// Returns an ssh.ClientConfig ready for establishing connections.
 func NewSSHClientConfig(timeout time.Duration, insecure bool, userConfig *UserConfig) (*ssh.ClientConfig, error) {
 
 	var hostKeyCallback ssh.HostKeyCallback
@@ -61,10 +76,22 @@ func NewSSHClientConfig(timeout time.Duration, insecure bool, userConfig *UserCo
 	return clientConfig, nil
 }
 
+// Addr returns the SSH server address in "host:port" format.
 func (uc *UserConfig) Addr() string {
 	return fmt.Sprintf("%s:%s", uc.hostName, uc.port)
 }
 
+// NewUserConfig reads SSH configuration from ~/.ssh/config and creates a UserConfig.
+// It parses the SSH config file for the specified host and applies defaults for
+// missing values (port 22, current user, id_ed25519 key).
+//
+// The function respects standard SSH config directives including:
+//   - HostName: the actual hostname or IP to connect to
+//   - Port: SSH port (defaults to 22)
+//   - User: username for authentication (defaults to current USER)
+//   - IdentityFile: path to private key (defaults to ~/.ssh/id_ed25519)
+//
+// Returns an error if the config file cannot be read or parsed.
 func NewUserConfig(host string) (*UserConfig, error) {
 
 	file, err := os.Open(sshUserFilePath("config"))
